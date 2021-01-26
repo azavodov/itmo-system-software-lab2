@@ -3,16 +3,35 @@
 #include <vector>
 #include <unistd.h>
 #include <cstring>
+#include <cstdio>
+#include <cstdlib>
 
-pthread_mutex_t mutex;
-pthread_cond_t condprod;
-pthread_cond_t condcons;
-pthread_cond_t condstart;
-
-
+int amount_active_worker_threads;
+int amount_expected_worker_threads;
+bool alive, empty;
 int max_delay = 0;
 int consumer_number = 0;
 int debug_mode = false;
+
+pthread_cond_t condstart;
+pthread_cond_t condcons, condprod, cond_interruptor;
+pthread_mutex_t mutex;
+
+std::vector <pthread_t> consumers;
+
+class mutex_guard {
+public:
+    mutex_guard(pthread_mutex_t &mutex) : mutex_(mutex) {
+        pthread_mutex_lock(&mutex_);
+    }
+
+    ~mutex_guard() {
+        pthread_mutex_unlock(&mutex_);
+    }
+
+private:
+    pthread_mutex_t &mutex_;
+};
 
 class Value {
 public:
@@ -30,21 +49,25 @@ private:
     int _value;
 };
 
-enum class Status {
-    STARTED,
-    FINISHED
-};
+void wait_other() {
+    mutex_guard guard(mutex);
 
-enum class ValueStatus {
-    NEEDSPRODUCER,
-    NEEDSCONSUMER
-};
+    ++amount_active_worker_threads;
+    bool need_notify = true;
+    while (amount_active_worker_threads < amount_expected_worker_threads && alive) {
+        need_notify = false;
+        pthread_cond_wait(&condstart, &mutex);
+    }
+    if (need_notify) {
+        pthread_cond_broadcast(&condstart);
+    }
+}
 
-namespace shared {
-    Status status;
-    ValueStatus value_status;
-    int result = 0;
-    Value value;
+void sleep() {
+    if (max_delay != 0) {
+        int random_delay = rand() % (max_delay + 1);
+        usleep(random_delay * 1000);
+    }
 }
 
 int get_tid() {
@@ -58,7 +81,7 @@ int get_tid() {
     if (key_flag) {
         pthread_mutex_lock(&tid_key_lock);
         if (key_flag) {
-            pthread_key_create(&tid_key, [](void* ptr) {
+            pthread_key_create(&tid_key, [](void *ptr) {
                 free(ptr);
             });
             key_flag = false;
@@ -66,7 +89,7 @@ int get_tid() {
         pthread_mutex_unlock(&tid_key_lock);
     }
     if (pthread_getspecific(tid_key) == NULL) {
-        int* ptr = (int*)(malloc(sizeof(int)));
+        int *ptr = (int *) (malloc(sizeof(int)));
         pthread_mutex_lock(&tid_value_lock);
         *ptr = tid_value;
         tid_value++;
@@ -74,134 +97,123 @@ int get_tid() {
         pthread_mutex_unlock(&tid_value_lock);
         return *ptr;
     } else {
-        return *(int*)(pthread_getspecific(tid_key));
+        return *(int *) (pthread_getspecific(tid_key));
     }
 }
 
-void print_debug_message(Value *value) {
+void print_debug_message(int value) {
     if (debug_mode) {
-        std::cout << '(' << get_tid() << ", " << value->get() << ')' << std::endl;
+        std::cout << '(' << get_tid() << ", " << value << ')' << std::endl;
     }
 }
 
 void *producer_routine(void *arg) {
-    if (shared::status != Status::STARTED) {
-        pthread_mutex_lock(&mutex);
-    }
-    while (shared::status != Status::STARTED) {
-        pthread_cond_wait(&condstart, &mutex);
-    }
-    pthread_mutex_unlock(&mutex);
+    wait_other();
 
-    Value *value = static_cast<Value *>(arg);
-    std::vector<int> values;
+    Value &value = *(Value *) arg;
     int number;
-
-    while (std::cin >> number) {
-        values.push_back(number);
-    }
-
-    for (std::vector<int>::iterator it = values.begin(); it != values.end(); ++it) {
-        pthread_mutex_lock(&mutex);
-        value->update(*it);
-        shared::value_status = ValueStatus::NEEDSCONSUMER;
-        pthread_cond_signal(&condprod);
-
-        while (shared::value_status != ValueStatus::NEEDSPRODUCER) {
-            pthread_cond_wait(&condcons, &mutex);
+    while (alive) {
+        mutex_guard guard(mutex);
+        if (std::cin >> number) {
+            value.update(number);
+            empty = false;
+            pthread_cond_signal(&condcons);
+        } else {
+            alive = false;
+            pthread_cond_broadcast(&condcons);
         }
-        pthread_mutex_unlock(&mutex);
+        while (!empty && alive) {
+            pthread_cond_wait(&condprod, &mutex);
+        }
     }
-    pthread_mutex_lock(&mutex);
-    shared::status = Status::FINISHED;
-    pthread_cond_broadcast(&condprod);
-    pthread_mutex_unlock(&mutex);
-
     return nullptr;
 }
 
 void *consumer_routine(void *arg) {
-    pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, nullptr);
+    pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, NULL);
+    wait_other();
 
-    pthread_mutex_lock(&mutex);
-    shared::status = Status::STARTED;
-    pthread_cond_broadcast(&condstart);
-    pthread_mutex_unlock(&mutex);
-
-    Value *value = static_cast<Value *>(arg);
-
+    Value &value = *(Value *) arg;
+    long sum = 0;
     while (true) {
-        pthread_mutex_lock(&mutex);
-        while (shared::value_status != ValueStatus::NEEDSCONSUMER &&
-               shared::status != Status::FINISHED) {
-            pthread_cond_wait(&condprod, &mutex);
+        {
+            mutex_guard guard(mutex);
+            while (empty && alive) {
+                pthread_cond_wait(&condcons, &mutex);
+            }
+            if (!alive) {
+                break;
+            }
+            int l = value.get();
+            empty = true;
+            sum += l;
+            print_debug_message(sum);
+            pthread_cond_signal(&condprod);
         }
-
-        if (shared::status == Status::FINISHED) {
-            pthread_mutex_unlock(&mutex);
-            break;
-        }
-
-        shared::result += value->get();
-        print_debug_message(value);
-        shared::value_status = ValueStatus::NEEDSPRODUCER;
-        pthread_cond_signal(&condcons);
-        pthread_mutex_unlock(&mutex);
-
-        if (max_delay != 0) {
-            int random_delay = rand() % (max_delay + 1);
-            usleep(random_delay * 1000);
-        }
+        sleep();
     }
-    return &shared::result;
 
+    return new long(sum);
 }
 
 void *consumer_interruptor_routine(void *arg) {
-    if (shared::status != Status::STARTED) {
-        pthread_mutex_lock(&mutex);
-    }
-    std::vector <pthread_t> *threads = static_cast<std::vector <pthread_t> *>(arg);
-    while (shared::status != Status::STARTED) {
-        pthread_cond_wait(&condstart, &mutex);
-    }
-    pthread_mutex_unlock(&mutex);
+    wait_other();
 
-    while (shared::status != Status::FINISHED) {
-        int thread_to_cancel = rand() % threads->size();
-        pthread_cancel(threads->at(thread_to_cancel));
+    std::vector <pthread_t> const &consumers = *(std::vector <pthread_t> *) arg;
+    while (true) {
+        for (size_t i = 0; i < consumers.size(); ++i) {
+            pthread_cancel(consumers[i]);
+        }
+        pthread_mutex_lock(&mutex);
+        bool local_alive = alive;
+        pthread_mutex_unlock(&mutex);
+        if (!local_alive) {
+            break;
+        }
+        sleep();
     }
     return nullptr;
 }
 
 int run_threads() {
+    Value value;
     pthread_cond_init(&condstart, nullptr);
-    pthread_cond_init(&condprod, nullptr);
     pthread_cond_init(&condcons, nullptr);
+    pthread_cond_init(&condprod, nullptr);
     pthread_mutex_init(&mutex, nullptr);
+    alive = true;
+    empty = true;
+    amount_active_worker_threads = 0;
+    amount_expected_worker_threads = 2 + consumer_number;
+
+    consumers.resize(consumer_number);
+    for (size_t i = 0; i < consumers.size(); ++i) {
+        pthread_create(&consumers[i], NULL, consumer_routine, (void *) &value);
+    }
 
     pthread_t producer;
     pthread_t interruptor;
-    std::vector <pthread_t> consumers(consumer_number);
+    pthread_create(&producer, NULL, producer_routine, (void *) &value);
+    pthread_create(&interruptor, NULL, consumer_interruptor_routine, (void *) &consumers);
 
-    pthread_create(&producer, nullptr, producer_routine, &shared::value);
-    for (auto &cons : consumers) {
-        pthread_create(&cons, nullptr, consumer_routine, &shared::value);
-    }
-    pthread_create(&interruptor, nullptr, consumer_interruptor_routine, &consumers);
+    pthread_join(producer, NULL);
+    pthread_join(interruptor, NULL);
 
-    pthread_join(producer, nullptr);
-    pthread_join(interruptor, nullptr);
-    for (auto &cons : consumers) {
-        pthread_join(cons, nullptr);
+    long acc_result = 0;
+    for (size_t i = 0; i < consumers.size(); ++i) {
+        long *local_result;
+        pthread_join(consumers[i], (void **) &local_result);
+        acc_result += *local_result;
+        delete local_result;
     }
+    int ret_value = acc_result;
 
     pthread_mutex_destroy(&mutex);
     pthread_cond_destroy(&condcons);
     pthread_cond_destroy(&condprod);
     pthread_cond_destroy(&condstart);
 
-    return shared::result;
+    return ret_value;
 }
 
 int main(int argc, char *argv[]) {
