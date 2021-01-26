@@ -8,8 +8,10 @@ pthread_cond_t condprod;
 pthread_cond_t condcons;
 pthread_cond_t condstart;
 
+
 int max_delay = 0;
 int consumer_number = 0;
+int debug_mode = false;
 
 class Value {
 public:
@@ -42,6 +44,16 @@ namespace shared {
     ValueStatus value_status;
     int result = 0;
     Value value;
+}
+
+int get_tid() {
+    return (long)pthread_self();
+}
+
+void print_debug_message(Value *value) {
+    if (debug_mode) {
+        std::cout << '(' << get_tid() << ", " << value->get() << ')' << std::endl;
+    }
 }
 
 void *producer_routine(void *arg) {
@@ -103,6 +115,7 @@ void *consumer_routine(void *arg) {
         }
 
         shared::result += value->get();
+        print_debug_message(value);
         shared::value_status = ValueStatus::NEEDSPRODUCER;
         pthread_cond_signal(&condcons);
         pthread_mutex_unlock(&mutex);
@@ -118,8 +131,7 @@ void *consumer_interruptor_routine(void *arg) {
     if (shared::status != Status::STARTED) {
         pthread_mutex_lock(&mutex);
     }
-    std::vector <pthread_t> *threads =
-            static_cast<std::vector <pthread_t> *>(arg);
+    std::vector <pthread_t> *threads = static_cast<std::vector <pthread_t> *>(arg);
     while (shared::status != Status::STARTED) {
         pthread_cond_wait(&condstart, &mutex);
     }
@@ -128,7 +140,6 @@ void *consumer_interruptor_routine(void *arg) {
     while (shared::status != Status::FINISHED) {
         int thread_to_cancel = rand() % threads->size();
         pthread_cancel(threads->at(thread_to_cancel));
-
     }
     return nullptr;
 }
@@ -144,18 +155,10 @@ int run_threads() {
     std::vector <pthread_t> consumers(consumer_number);
 
     pthread_create(&producer, nullptr, producer_routine, &shared::value);
-
-
     for (auto &cons : consumers) {
         pthread_create(&cons, nullptr, consumer_routine, &shared::value);
     }
-
-    pthread_create(
-            &interruptor,
-            nullptr,
-            consumer_interruptor_routine,
-            &consumers
-    );
+    pthread_create(&interruptor, nullptr, consumer_interruptor_routine, &consumers);
 
     pthread_join(producer, nullptr);
     pthread_join(interruptor, nullptr);
@@ -171,16 +174,15 @@ int run_threads() {
     return shared::result;
 }
 
-int get_tid() {
-    return 0;
-}
-
 int main(int argc, char *argv[]) {
     if (argc < 3 || argc > 4) {
         return 1;
     }
     consumer_number = std::atoi(argv[1]);
     max_delay = std::atoi(argv[2]);
+    if (argc > 3 && std::strcmp(argv[3], "-debug") == 0) {
+        debug_mode = true;
+    }
     std::cout << run_threads() << std::endl;
     return 0;
 }
