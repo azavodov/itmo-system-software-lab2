@@ -47,7 +47,34 @@ namespace shared {
 }
 
 int get_tid() {
-    return (long)pthread_self();
+    // Source:
+    // http://dulanja.blogspot.com/2011/09/how-to-use-thread-local-storage-tls-in.html
+    static pthread_key_t tid_key;
+    static bool key_flag = true;
+    static int tid_value = 1;
+    static pthread_mutex_t tid_key_lock = PTHREAD_MUTEX_INITIALIZER;
+    static pthread_mutex_t tid_value_lock = PTHREAD_MUTEX_INITIALIZER;
+    if (key_flag) {
+        pthread_mutex_lock(&tid_key_lock);
+        if (key_flag) {
+            pthread_key_create(&tid_key, [](void* ptr) {
+                free(ptr);
+            });
+            key_flag = false;
+        }
+        pthread_mutex_unlock(&tid_key_lock);
+    }
+    if (pthread_getspecific(tid_key) == NULL) {
+        int* ptr = (int*)(malloc(sizeof(int)));
+        pthread_mutex_lock(&tid_value_lock);
+        *ptr = tid_value;
+        tid_value++;
+        pthread_setspecific(tid_key, ptr);
+        pthread_mutex_unlock(&tid_value_lock);
+        return *ptr;
+    } else {
+        return *(int*)(pthread_getspecific(tid_key));
+    }
 }
 
 void print_debug_message(Value *value) {
