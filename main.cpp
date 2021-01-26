@@ -148,8 +148,10 @@ void *consumer_routine(void *arg) {
         pthread_cond_signal(&condcons);
         pthread_mutex_unlock(&mutex);
 
-        int random_delay = rand() % max_delay;
-        usleep(random_delay);
+        if (max_delay != 0) {
+            int random_delay = rand() % (max_delay + 1);
+            usleep(random_delay * 1000);
+        }
     }
     return &shared::result;
 
