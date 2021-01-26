@@ -2,6 +2,7 @@
 #include <iostream>
 #include <vector>
 #include <unistd.h>
+#include <cstring>
 
 pthread_mutex_t mutex;
 pthread_cond_t condprod;
